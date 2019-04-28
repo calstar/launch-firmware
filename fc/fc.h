@@ -35,7 +35,7 @@ struct Node {
 
     static Node* createList(int length) {
         Node* first = new Node(nullptr, 0);
-        Node* last = first; 
+        Node* last = first;
         for (int i = 0; i < length; i++) {
             last = new Node(last, 0);
             last->previous->next = last;
@@ -72,9 +72,10 @@ us_timestamp_t last_msg_send_us;
 
 uint8_t rs422_read_buf[BUF_SIZE];
 UARTSerial rs422(RS422_TX, RS422_RX, RS422_BAUDRATE);
+void sendAck(uint8_t frame_id);
 
 
-/* 
+/*
  * Sets LED based on current state
  */
 void updated_leds() {
@@ -141,6 +142,9 @@ void read_messages() {
                         }
                     }
                     debug_uart.printf("\r\n");
+                }
+                if (msg->AckReqd()) {
+                    sendAck(msg->FrameID());
                 }
             }
         }
@@ -389,26 +393,69 @@ void buildCurrentMessage() {
                           state == FCState_Setup ? 0 : root->value, // 10.0f,
                           false, bpIgnited[0], true, bpIgnited[1], false,
                           bpIgnited[2], true, bpIgnited[3], false, bpIgnited[4],
-                          true, bpIgnited[5], false, bpIgnited[6]);
+                          true, bpIgnited[5], false, bpIgnited[6], FCUpdateType_StateUpdate, 0);
     builder.Finish(message);
 
     uint8_t bytes = (uint8_t)builder.GetSize();
     builder.Reset();
-    message =
-        CreateFCUpdateMsg(builder,
-                          bytes, // Fill in actual number of bytes
-                          state,
-                          // 0.0f, 1.0f, 2.0f,
-                          // 3.0f, 4.0f, 5.0f,
-                          // 6.0f, 7.0f, 8.0f,
-                          // If in setup, we haven't zeroed altitude yet, so just send 0 instead
-                          state == FCState_Setup ? 0 : root->value, // 10.0f,
-                          false, bpIgnited[0], true, bpIgnited[1], false,
-                          bpIgnited[2], true, bpIgnited[3], false, bpIgnited[4],
-                          true, bpIgnited[5], false, bpIgnited[6]);
+    message = CreateFCUpdateMsg(builder,
+        bytes, // Fill in actual number of bytes
+        state,
+        // 0.0f, 1.0f, 2.0f,
+        // 3.0f, 4.0f, 5.0f,
+        // 6.0f, 7.0f, 8.0f,
+        state == FCState_Setup ? 0 : root->value, //10.0f,
+        false, bpIgnited[0],
+        true, bpIgnited[1],
+        false, bpIgnited[2],
+        true, bpIgnited[3],
+        false, bpIgnited[4],
+        true, bpIgnited[5],
+        false, bpIgnited[6],
+        FCUpdateType_StateUpdate, 0);
     builder.Finish(message);
 }
 
+void sendAck(uint8_t frame_id) {
+    builder.Reset();
+    Offset<FCUpdateMsg> message = CreateFCUpdateMsg(builder,
+        1, // Can't be 0 or it will be ignored
+        state,
+        // 0.0f, 1.0f, 2.0f,
+        // 3.0f, 4.0f, 5.0f,
+        // 6.0f, 7.0f, 8.0f,
+        state == FCState_Setup ? 0 : root->value, //10.0f,
+        false, bpIgnited[0],
+        true, bpIgnited[1],
+        false, bpIgnited[2],
+        true, bpIgnited[3],
+        false, bpIgnited[4],
+        true, bpIgnited[5],
+        false, bpIgnited[6],
+        FCUpdateType_Ack, frame_id);
+    builder.Finish(message);
+
+    const uint8_t bytes = (uint8_t)builder.GetSize();
+    builder.Reset();
+    Offset<FCUpdateMsg> ack = CreateFCUpdateMsg(builder,
+        bytes, // Fill in actual number of bytes
+        state,
+        // 0.0f, 1.0f, 2.0f,
+        // 3.0f, 4.0f, 5.0f,
+        // 6.0f, 7.0f, 8.0f,
+        state == FCState_Setup ? 0 : root->value, //10.0f,
+        false, bpIgnited[0],
+        true, bpIgnited[1],
+        false, bpIgnited[2],
+        true, bpIgnited[3],
+        false, bpIgnited[4],
+        true, bpIgnited[5],
+        false, bpIgnited[6],
+        FCUpdateType_Ack, frame_id);
+    builder.Finish(ack);
+
+    rs422.write(builder.GetBufferPointer(), builder.GetSize());
+}
 int main() {
     start();
     while (1) {

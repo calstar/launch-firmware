@@ -6,6 +6,8 @@
 #include "mbed.h"
 #include "pins.h"
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #define DEBUG_UART_BAUDRATE (115200)
 #define RS422_BAUDRATE (115200)
@@ -15,6 +17,9 @@
 #define BUF_SIZE (256)
 // random 16 bytes that must be the same across all nodes
 #define ENCRYPT_KEY ("CALSTARENCRYPTKE")
+
+#define ACK_CHECK_INTERVAL_MS (200)
+#define MAX_NUM_RETRIES (50)
 
 // analog in is 0-1 from gnd to VCC (3.3V)
 // so multiply by 3.3V first, then multiply by inverse of resistive divider
@@ -28,8 +33,10 @@ using namespace Calstar;
 const UplinkMsg *getUplinkMsg(char c);
 const FCUpdateMsg *getFCUpdateMsg(char c);
 void buildCurrentMessage();
-
+void resend_msgs();
 void sendAck(uint8_t frame_id);
+
+void sendUplinkMsgToFC(uint8_t numBytes, bool with_ack, uint8_t frame_id);
 
 Timer msgTimer;
 FlatBufferBuilder builder(BUF_SIZE);
@@ -58,6 +65,11 @@ uint8_t remaining_send_buf[BUF_SIZE];
 int remaining_send_size = 0;
 int remaining_send_buf_start = 0;
 us_timestamp_t last_radio_send_us;
+int32_t t_last_resend;
+
+// frame_id, <message buffer, number of retries>
+std::unordered_map<uint8_t, std::pair<std::vector<uint8_t>, uint8_t>>
+    acks_remaining;
 
 void start() {
     fcPower = 0;
@@ -81,6 +93,8 @@ void start() {
     radio.setPowerDBm(20);
 
     debug_uart.printf("Radio init complete.\r\n");
+
+    t_last_resend = msgTimer.read_ms();
 }
 
 void loop() {
@@ -116,14 +130,30 @@ void loop() {
             last_radio_send_us = current_time;
         }
     }
+
+    //Resend messages awaiting ACK
+    if (msgTimer.read_ms() - t_last_resend > ACK_CHECK_INTERVAL_MS) {
+        resend_msgs();
+        t_last_resend = msgTimer.read_ms();
+    }
+
     // Always read messages
     while (rs422.readable()) {
         ssize_t num_read = rs422.read(rs422_read_buf, BUF_SIZE);
         for (int i = 0; i < num_read; i++) {
             const FCUpdateMsg *msg = getFCUpdateMsg(rs422_read_buf[i]);
-            if (msg) {
-                fcLatestData = msg;
-                debug_uart.printf("Read alt=%f ft\r\n", fcLatestData->Altitude());
+            if(msg){
+                if (msg->Type() == FCUpdateType_StateUpdate) {
+                    fcLatestData = msg;
+                    debug_uart.printf("Read alt=%f ft\r\n", fcLatestData->Altitude());
+                }
+                //msg->Type() == FCUpdateType_Ack
+                else {
+                    if (acks_remaining.count(msg->FrameID()) == 1) {
+                        acks_remaining.erase(msg->FrameID());
+                        debug_uart.printf("Received Ack for Message: %d\r\n", msg->FrameID());
+                    }
+                }
             }
         }
     }
@@ -180,7 +210,7 @@ void loop() {
                     fcPower = 0;
                     debug_uart.printf("    Turned off FC power.\r\n");
                 } else if (msg->Type() == UplinkType_Ack) {
-                    // TODO: deal with acks
+                    // TODO: deal with acks, if TPC ever needs to send a message that requires ACK
                     debug_uart.printf("    Acking message receive (TODO).\r\n");
                 } else {
                     // For other messages we just forward to FC.
@@ -194,7 +224,7 @@ void loop() {
                         }
                     }
                     debug_uart.printf(")to FC.\r\n");
-                    rs422.write(uplinkMsgBuffer, msg->Bytes());
+                    sendUplinkMsgToFC(msg->Bytes(), msg->AckReqd(), msg->FrameID());
                 }
                 if (msg->AckReqd()) {
                     sendAck(msg->FrameID());
@@ -414,4 +444,28 @@ void sendAck(uint8_t frame_id) {
                             false, 0, DownlinkType_Ack);
     builder.Finish(ack);
     radio.send(builder.GetBufferPointer(), builder.GetSize());
+}
+
+void sendUplinkMsgToFC(uint8_t numBytes, bool with_ack, uint8_t frame_id){
+    if (with_ack) {
+        acks_remaining.insert(
+            {frame_id, {std::vector<uint8_t>(uplinkMsgBuffer, uplinkMsgBuffer + numBytes), 0}});
+        debug_uart.printf("1");
+    }
+    rs422.write(uplinkMsgBuffer, numBytes);
+    debug_uart.printf("2");
+}
+
+void resend_msgs() {
+    for (auto &msg : acks_remaining) {
+        debug_uart.printf("![RESENDING FRAME '%d']!\r\n", (int)msg.first);
+        const std::vector<uint8_t> &vec = std::get<0>(msg.second);
+        rs422.write(vec.data(), vec.size());
+        // pc.printf("Complete\r\n");
+        std::get<1>(msg.second) = std::get<1>(msg.second) + 1;
+        if (std::get<1>(msg.second) >= MAX_NUM_RETRIES) {
+            debug_uart.printf("![FAILED TO SEND FRAME '%d']!\r\n", msg.first);
+            acks_remaining.erase(msg.first);
+        }
+    }
 }

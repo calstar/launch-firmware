@@ -1,7 +1,7 @@
 namespace Calstar;
 
 /* This is sent over radio as well so it should be kept small */
-
+enum FCUpdateType : byte { StateUpdate = 0, Ack = 1 }
 enum FCState : byte {
     Setup           = 0,
     Pad             = 1,
@@ -41,6 +41,8 @@ table FCUpdateMsg {
     BP6Ignited : bool;
     BP7Continuity : bool;
     BP7Ignited : bool;
+    Type : FCUpdateType;
+    FrameID : uint8;
 }
 
 root_type FCUpdateMsg;
